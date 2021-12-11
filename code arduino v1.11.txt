@@ -1,0 +1,159 @@
+//
+//
+//         ______              ___          ____               _           __      
+//        / ____/_______  ____/ ( )_____   / __ \_________    (_)__  _____/ /______
+//       / /_  / ___/ _ \/ __  /|// ___/  / /_/ / ___/ __ \  / / _ \/ ___/ __/ ___/
+//      / __/ / /  /  __/ /_/ /  (__  )  / ____/ /  / /_/ / / /  __/ /__/ /_(__  ) 
+//     /_/   /_/   \___/\__,_/  /____/  /_/   /_/   \____/_/ /\___/\___/\__/____/  
+//                                                      /___/                      
+//
+//
+//                                       REGULATEUR DE PRESSION          V 1.11 - 10/12/2021
+//                                       ARDUINO NANO
+// 
+// Capteur de pression MKS BAROTRON 10 mTorr alimenté en +/- 15V. Sortie 0-10 V connecté à l'arduino via un circuit de protection de l'entrée analogique limitant la tension à 5V
+//
+// Entrée broche A0 : capteur (configuré en référence externe connecté au 3.3V)
+//
+// Réglage de la consigne de pression par pas de 0.05 mTorr par appuit sur deux boutons poussoir
+// Entrée broche D2 : consigne_plus (configurée en pullup)
+// Entrée broche D3 : consigne_moins (configurée en pullup)
+//
+// Commande par mosfet d'une électrovanne en fonction de la consigne de pression pour injecter du gaz dans l'enceinte à vide
+// Sortie broche D4 : sortie
+//
+// Affichage de la mesure et de la consigne sur écran OLED connecté sur le bus I2C
+// SDA broche A4
+// SCL broche A5 
+//
+//
+//
+//
+//
+// ********************************************************************************************************************************************
+// CHARGEMENT DES BIBLIOTHEQUES
+// ********************************************************************************************************************************************
+#include <SPI.h>                                                                                                 // 
+#include <Wire.h>                                                                                                // Pilotage du bus I2C
+#include <Adafruit_GFX.h>                                                                                        // Pilotage de l'écran OLED
+#include <Adafruit_SSD1306.h>                                                                                    // Pilotage de l'écran OLED
+
+// ********************************************************************************************************************************************
+// DEFINITION DES ENTREES / SORTIES
+// ********************************************************************************************************************************************
+// MESURE
+const int capteur = 0;                                                                                           // L'entrée de mesure est connectée sur la broche analogique 0
+// CONSIGNE
+const int consigne_plus = 2;                                                                                     // Le bouton consigne_plus est connecté sur la broche digital 2
+const int consigne_moins = 3;                                                                                    // Le bouton consigne_moins est connecté sur la broche digital 3
+// SORTIE
+const int sortie = 4;                                                                                            // La sortie du régulateur est connectée sur la broche digital 4
+// ECRAN OLED
+#define nombreDePixelsEnLargeur 128                                                                              // Largeur de l'écran OLED (pixel)
+#define nombreDePixelsEnHauteur 32                                                                               // Hauteur de l'écran OLED (pixel)
+#define brocheResetOLED         -1                                                                               // Reset de l'écran OLED partagé avec l'Arduino
+#define adresseI2CecranOLED     0x3C                                                                             // Adresse de l'écran OLED sur le bus I2C
+Adafruit_SSD1306 ecranOLED(nombreDePixelsEnLargeur, nombreDePixelsEnHauteur, &Wire, brocheResetOLED);            // Paramétrage bibliothèque Adafruit_SSD1306
+
+// ********************************************************************************************************************************************
+// DEFINITION DES VARIABLES
+// ********************************************************************************************************************************************
+// MESURE
+int mesure_adc;                                                                                                  // Variable pour stocker la valeur lue sur l'ADC
+float mesure;                                                                                                    // Variable pour stocker la mesure calculé dans la bonne unité
+// CONSIGNE
+float consigne = 0.20;                                                                                           // Variable pour stocker la consigne et l'initialisation à 0.20
+float pas_consigne = 0.05;                                                                                       // Variable pour stocker le pas de la consigne et initialisation à 0.05
+// ETAT SORTIE
+char etat_sortie;                                                                                                // Variable pour stocker l'état de la sortie
+
+// ********************************************************************************************************************************************
+// SETUP ARDUINO
+// ********************************************************************************************************************************************
+void setup()
+{
+    // INITIALISATION DES ENTREES / SORTIES
+    analogReference(EXTERNAL);                                                                                   // Configure la référence de l'entrée analogique sur externe (REF reliée au 3.3V) 
+    pinMode(consigne_plus, INPUT_PULLUP);                                                                        // Configure l'entré du bouton consigne_plus en pullup interne
+    pinMode(consigne_moins, INPUT_PULLUP);                                                                       // Configure l'entré du bouton consigne_moins en pullup interne
+    pinMode(sortie, OUTPUT);                                                                                     // Configure la sortie du régulateur en sortie numérique
+    digitalWrite(sortie, LOW);                                                                                   // Initialise la broche de sortie du régulateur à LOW
+    Serial.begin(9600);                                                                                          // Initialise la liaison série 
+    if(!ecranOLED.begin(SSD1306_SWITCHCAPVCC, adresseI2CecranOLED))                                              // Initialisation de l'écran OLED
+    while(1);                                                                                                    // Arrêt du programme (boucle infinie) si échec d'initialisation
+    
+    // ECRAN DE DEMARRAGE
+    ecranOLED.clearDisplay();                                                                                    // Effacement de l'écran OLED
+    ecranOLED.setCursor(0, 0);                                                                                   // Coordonnées du point de départ du texte
+    ecranOLED.setTextColor(WHITE);                                                                               // Couleur d'écriture des caractères
+    ecranOLED.setTextSize(2);                                                                                    // Taille des caractères
+    ecranOLED.println("REGULATEUR");
+    ecranOLED.println("V 1.11");
+    ecranOLED.display();                                                                                         // Affichage de l'écran OLED
+
+    // DELAIS
+    delay(5000);    
+}
+
+// ********************************************************************************************************************************************
+// PROGRAMME
+// ********************************************************************************************************************************************
+void loop()
+{
+    // LECTURE DU CAPTEUR
+    mesure_adc = analogRead(capteur);                                                                            // Lecture de la tension du capteur par l'ADC
+    mesure = mesure_adc * 3.3 / 1023;                                                                            // Calcul de la conversion de la mesure_adc en mesure dans la bonne unité
+
+    // SORTIE EN FONCTION DE LA CONSIGNE
+    if (mesure <= consigne)                                                                                      // Test si mesure < consigne
+    {
+        digitalWrite(sortie, HIGH);                                                                              // Si oui la sortie est à HIGH
+        etat_sortie = 'O';                                                                                       // et place etat_sortie à Ouvert
+        delay(30);                                                                                               // Delais commutation électrovanne
+    }
+    else {
+        digitalWrite(sortie, LOW);                                                                               // Si non la sortie est LOW
+        etat_sortie = 'F';                                                                                       // et place etat_sortie à Fermé
+        delay(30);                                                                                               // Delais commutation électrovanne
+    }
+
+    // REGLAGE DE LA CONSIGNE
+    boolean etat_consigne_plus = digitalRead(consigne_plus);                                                     // Lecture de l'état de consigne_plus et stockage dans la variable d'état
+    boolean etat_consigne_moins = digitalRead(consigne_moins);                                                   // Lecture de l'état de consigne_moins et stockage dans la variable d'état
+    
+    if (etat_consigne_plus == LOW)                                                                               // Test si le bouton consigne_plus est appuyé (inversé à cause du pullup de l'entrée)
+    {
+    while(!digitalRead(consigne_plus)){;}                                                                        // Attend que le bouton consigne_plus soit relaché
+        consigne = consigne + pas_consigne;                                                                      // et incrémente consigne du pas_consigne
+        delay(30);                                                                                               // Delais anti rebond
+    }
+    if (etat_consigne_moins == LOW)                                                                              // Test si le bouton consigne_moins est appuyé (inversé à cause du pullup de l'entrée)
+    {
+    while(!digitalRead(consigne_moins)){;}                                                                       // Attend que le bouton consigne_moins soit relaché
+      consigne = consigne - pas_consigne;                                                                        // et décrémente consigne du pas_consigne
+      delay(30);                                                                                                 // Delais anti rebond
+    }
+
+    // AFFICHAGE SUR ECRAN OLED
+    ecranOLED.clearDisplay();                                                                                     // Effacement de l'écran OLED
+    ecranOLED.setCursor(0, 0);                                                                                    // Coordonnées du point de départ du texte
+    ecranOLED.setTextColor(WHITE);                                                                                // Couleur d'écriture des caractères
+    ecranOLED.setTextSize(2);                                                                                     // Taille des caractères
+    ecranOLED.print("M :");
+    ecranOLED.print(mesure,3);
+    ecranOLED.print(" ");
+    ecranOLED.println(etat_sortie);
+    ecranOLED.print("C :");
+    ecranOLED.println(consigne,2);
+    ecranOLED.display();                                                                                          // Affichage de l'écran OLED 
+
+    // ENVOIE SUR PORT SERIE POUR LE DEBUG
+    Serial.print("Mesure : ");
+    Serial.print(mesure_adc);
+    Serial.print(" * Mesure : ");
+    Serial.print(mesure,3);
+    Serial.print(" * Consigne : ");
+    Serial.print(consigne,2);
+    Serial.print(" * Etat Sortie :");
+    Serial.println(etat_sortie);
+}
